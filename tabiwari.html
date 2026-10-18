@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1B1F3B">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>たびわり｜旅の立替・割り勘</title>
+<link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700;800;900&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: { extend: {
+    colors: { ink:'#1B1F3B', paper:'#F5F7FA', lime:'#CFFF5E', sky:'#5BC8F5', pinky:'#FF5C8A', sun:'#FFC83D', good:'#0E9F6E', bad:'#E5365F' },
+    fontFamily: { sans:['"M PLUS Rounded 1c"','ui-rounded','system-ui','sans-serif'] }
+  } }
+}
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+  html,body{background:#F5F7FA;-webkit-tap-highlight-color:transparent;touch-action:manipulation;overscroll-behavior-y:none}
+  body{font-family:"M PLUS Rounded 1c",ui-rounded,system-ui,sans-serif;color:#1B1F3B}
+  .noscroll::-webkit-scrollbar{display:none}.noscroll{scrollbar-width:none}
+  .keyshadow{box-shadow:0 3px 0 #1B1F3B}
+  .keyshadow:active{transform:translateY(3px);box-shadow:none}
+  .nosel{user-select:none;-webkit-user-select:none}
+  .safe-b{padding-bottom:max(env(safe-area-inset-bottom),8px)}
+  @keyframes pop{0%{transform:scale(.9);opacity:0}100%{transform:scale(1);opacity:1}}
+  .pop{animation:pop .15s ease-out}
+  @media (prefers-reduced-motion:reduce){.pop{animation:none}}
+  button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #5BC8F5;outline-offset:2px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useMemo,useRef,useCallback}=React;
+
+/* ============ 保存（LocalStorage。使えない環境ではメモリ保存に自動フォールバック） ============ */
+const KEY='tabiwari.v1', PREV='tabiwari.prev';
+const store=(()=>{
+  let ok=false; const mem={};
+  try{localStorage.setItem('__t','1');localStorage.removeItem('__t');ok=true}catch(e){}
+  return {
+    persistent:ok,
+    get(k){try{return ok?localStorage.getItem(k):(k in mem?mem[k]:null)}catch(e){return k in mem?mem[k]:null}},
+    set(k,v){mem[k]=v;try{if(ok)localStorage.setItem(k,v)}catch(e){}}
+  };
+})();
+
+/* ============ 定数 ============ */
+const DEFAULT_RATES={JPY:1,USD:150,EUR:162,GBP:190,THB:4.4,KRW:0.11,TWD:4.7,CNY:21,AUD:98,SGD:115};
+const SYMBOL={JPY:'¥',USD:'$',EUR:'€',GBP:'£',THB:'฿',KRW:'₩',TWD:'NT$',CNY:'元',AUD:'A$',SGD:'S$'};
+const RESTO='レストラン'; // この費目を選ぶと傾斜割り勘の画面に切り替わる（削除不可）
+const DEFAULT_CATS=[{k:RESTO,e:'🍽️'},{k:'交通費',e:'🚇'}];
+const catEmoji=(S,k)=>((S.cats||[]).find(c=>c.k===k)||{e:'🧾'}).e;
+const COLORS=['#FF5C8A','#5BC8F5','#FFC83D','#9BD93C','#B28DFF','#FF9F5A'];
+
+const initial=()=>({
+  tripName:'卒業旅行', members:['A','B','C','D'], me:0, setup:false,
+  rates:{...DEFAULT_RATES}, active:['JPY','USD','EUR','GBP','THB'], curr:'JPY',
+  lastPayer:0, expenses:[], lastBackup:null, cats:DEFAULT_CATS.map(c=>({...c}))
+});
+function load(){
+  try{const raw=store.get(KEY); if(raw){return {...initial(),...JSON.parse(raw)}}}catch(e){}
+  return initial();
+}
+
+/* ============ ユーティリティ ============ */
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const yen=n=>(n<0?'−':'')+'¥'+Math.abs(Math.round(n)).toLocaleString('ja-JP');
+const signedYen=n=>n>0?'＋'+yen(n):n<0?yen(n):'±¥0';
+const sym=c=>SYMBOL[c]||c+' ';
+const fmtNum=(n,d=2)=>Number(n).toLocaleString('ja-JP',{maximumFractionDigits:d});
+const fmtDate=ts=>{const d=new Date(ts);return `${d.getMonth()+1}/${d.getDate()}(${'日月火水木金土'[d.getDay()]})`};
+const fmtTime=ts=>{const d=new Date(ts);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
+const ago=ts=>{const m=Math.floor((Date.now()-ts)/60000);if(m<1)return 'たった今';if(m<60)return m+'分前';const h=Math.floor(m/60);if(h<24)return h+'時間前';return Math.floor(h/24)+'日前'};
+
+async function copyText(t){
+  try{await navigator.clipboard.writeText(t);return true}catch(e){
+    try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.focus();ta.select();const ok=document.execCommand('copy');document.body.removeChild(ta);return ok}catch(e2){return false}
+  }
+}
+
+/* 合計を重みに応じて整数で按分（端数は大きい順に配る） */
+function allocate(total,weights){
+  const sw=weights.reduce((a,b)=>a+b,0);
+  if(sw<=0)return weights.map(()=>0);
+  const raw=weights.map(w=>total*w/sw), fl=raw.map(Math.floor);
+  const rem=total-fl.reduce((a,b)=>a+b,0);
+  const order=raw.map((r,i)=>[r-fl[i],i,weights[i]]).filter(x=>x[2]>0).sort((a,b)=>b[0]-a[0]);
+  for(let k=0;k<rem;k++)fl[order[k%order.length][1]]++;
+  return fl;
+}
+
+function balances(S){
+  const n=S.members.length, b=Array(n).fill(0);
+  S.expenses.forEach(e=>{b[e.payer]+=e.jpy;e.shares.forEach((s,i)=>{b[i]-=s})});
+  return b;
+}
+
+/* 最小送金回数：ゼロ和グループに最大分割（グループ内はn-1回で精算できる） */
+function settle(bal){
+  const items=bal.map((b,i)=>({i,b})).filter(x=>x.b!==0);
+  const m=items.length; if(!m)return [];
+  let groups;
+  if(m<=14){
+    const N=1<<m, sum=new Float64Array(N), dp=new Int16Array(N), prev=new Int8Array(N);
+    for(let mask=1;mask<N;mask++){const low=mask&-mask;sum[mask]=sum[mask^low]+items[31-Math.clz32(low)].b}
+    for(let mask=1;mask<N;mask++){
+      let best=-1,bi=-1;
+      for(let i=0;i<m;i++)if(mask&(1<<i)){const v=dp[mask^(1<<i)];if(v>best){best=v;bi=i}}
+      dp[mask]=best+(sum[mask]===0?1:0);prev[mask]=bi;
+    }
+    const order=[];let mask=N-1;
+    while(mask){const i=prev[mask];order.push(i);mask^=1<<i}
+    order.reverse();
+    groups=[];let cur=[],s=0;
+    order.forEach(i=>{cur.push(items[i]);s+=items[i].b;if(s===0){groups.push(cur);cur=[]}});
+    if(cur.length)groups.push(cur);
+  }else groups=[items];
+  const out=[];
+  groups.forEach(g=>{
+    const d=g.filter(x=>x.b<0).map(x=>({i:x.i,a:-x.b})).sort((a,b)=>b.a-a.a);
+    const c=g.filter(x=>x.b>0).map(x=>({i:x.i,a:x.b})).sort((a,b)=>b.a-a.a);
+    let p=0,q=0;
+    while(p<d.length&&q<c.length){
+      const t=Math.min(d[p].a,c[q].a);
+      out.push({from:d[p].i,to:c[q].i,amt:t});
+      d[p].a-=t;c[q].a-=t;
+      if(d[p].a===0)p++; if(c[q].a===0)q++;
+    }
+  });
+  return out;
+}
+
+function statusText(S,bal,tr){
+  const total=S.expenses.reduce((a,e)=>a+e.jpy,0), nm=i=>S.members[i];
+  return [
+    `🧳 ${S.tripName} 立替状況`,
+    `📅 ${fmtDate(Date.now())} ${fmtTime(Date.now())}時点`,
+    `💰 総支出 ${yen(total)}（${S.expenses.length}件）`,
+    '',
+    '⚖️ 立替バランス',
+    ...bal.map((b,i)=>`${b>0?'🟢':b<0?'🔴':'⚪'} ${nm(i)}　${signedYen(b)}${b>0?'（払いすぎ）':b<0?'（不足）':''}`),
+    '',
+    tr.length?'💸 精算するなら':'🎉 全員イーブン！',
+    ...tr.map(t=>`${nm(t.from)} ➔ ${nm(t.to)}　${yen(t.amt)}`),
+    '',
+    '📱 たびわりで集計'
+  ].join('\n');
+}
+function settleText(S,tr){
+  const total=S.expenses.reduce((a,e)=>a+e.jpy,0), nm=i=>S.members[i];
+  return [
+    `🧳 ${S.tripName} 精算結果`,
+    `💰 総支出 ${yen(total)}（1人あたり約${yen(total/S.members.length)}）`,
+    '',
+    tr.length?'💸 この通りに送金すれば全員イーブン！':'🎉 精算ゼロ！全員イーブン',
+    ...tr.map((t,i)=>`${i+1}. ${nm(t.from)} ➔ ${nm(t.to)}　${yen(t.amt)}`),
+    '',
+    `✅ 送金は全部で${tr.length}回`,
+    '📱 たびわりで集計'
+  ].join('\n');
+}
+
+/* ============ 共通UI ============ */
+const Chip=({on,children,onClick,className=''})=>(
+  <button onClick={onClick} className={`shrink-0 px-4 h-11 rounded-full border-2 font-bold text-[15px] nosel active:scale-95 transition-colors ${on?'bg-ink text-lime border-ink':'bg-white text-ink border-ink/15'} ${className}`}>{children}</button>
+);
+const Dot=({i,size=12})=><span className="inline-block rounded-full shrink-0" style={{width:size,height:size,background:COLORS[i%COLORS.length]}}/>;
+const Avatar=({S,i,size=36})=>(
+  <span className="inline-flex items-center justify-center rounded-full font-black text-ink shrink-0 border-2 border-ink" style={{width:size,height:size,background:COLORS[i%COLORS.length],fontSize:size*0.42}}>{(S.members[i]||'?').slice(0,1)}</span>
+);
+const MemberChip=({S,i,on,onClick})=>(
+  <Chip on={on} onClick={onClick}><span className="inline-flex items-center gap-2"><Dot i={i}/>{S.members[i]}</span></Chip>
+);
+const Card=({children,className=''})=><div className={`bg-white rounded-3xl p-4 border-2 border-ink/10 ${className}`}>{children}</div>;
+const H=({children,sub})=>(<div className="mb-3"><h2 className="text-xl font-black">{children}</h2>{sub&&<p className="text-sm text-ink/60 mt-0.5">{sub}</p>}</div>);
+const Btn=({children,onClick,kind='main',disabled,className=''})=>{
+  const k={main:'bg-lime text-ink border-ink keyshadow',dark:'bg-ink text-white border-ink keyshadow',ghost:'bg-white text-ink border-ink/20',danger:'bg-bad text-white border-ink keyshadow'}[kind];
+  return <button disabled={disabled} onClick={onClick} className={`w-full h-14 rounded-2xl border-2 font-black text-[17px] nosel disabled:opacity-40 disabled:pointer-events-none ${k} ${className}`}>{children}</button>;
+};
+function Modal({children}){
+  return (
+    <div className="fixed inset-0 z-50 bg-ink/60 flex items-end justify-center">
+      <div className="pop bg-white w-full max-w-md rounded-t-[28px] p-5 max-h-[92vh] overflow-auto safe-b">{children}</div>
+    </div>
+  );
+}
+function TwoStep({title,lines,okLabel,typeWord,onOk,onCancel}){
+  const [step,setStep]=useState(1);const [typed,setTyped]=useState('');
+  const can=!typeWord||typed===typeWord;
+  return (
+    <Modal>
+      <div className="text-4xl mb-2">{step===1?'🤔':'⚠️'}</div>
+      <h3 className="text-xl font-black">{step===1?title:'本当に実行しますか？'}</h3>
+      <p className="text-ink/70 mt-2 leading-relaxed">{step===1?lines[0]:(lines[1]||'この操作はすぐに反映されます。')}</p>
+      {step===2&&typeWord&&(
+        <div className="mt-3">
+          <p className="text-sm font-bold mb-1">確認のため「{typeWord}」と入力してください</p>
+          <input value={typed} onChange={e=>setTyped(e.target.value)} className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+        </div>
+      )}
+      <div className="grid grid-cols-2 gap-3 mt-5">
+        <Btn kind="ghost" onClick={onCancel}>やめる</Btn>
+        {step===1?<Btn kind="dark" onClick={()=>setStep(2)}>続ける</Btn>
+                 :<Btn kind="danger" disabled={!can} onClick={onOk}>{okLabel}</Btn>}
+      </div>
+    </Modal>
+  );
+}
+
+/* ============ 入力：通常 ============ */
+function CurrencyRow({S,setS,onEditRate}){
+  const rate=S.rates[S.curr]||1;
+  return (
+    <div>
+      <div className="flex gap-2 overflow-x-auto noscroll -mx-4 px-4">
+        {S.active.map(c=><Chip key={c} on={S.curr===c} onClick={()=>setS(s=>({...s,curr:c}))}>{sym(c).trim()} {c}</Chip>)}
+      </div>
+      {S.curr!=='JPY'&&(
+        <button onClick={()=>onEditRate(S.curr)} className="mt-2 text-sm font-bold text-ink/70 underline decoration-dotted">
+          1 {S.curr} = ¥{fmtNum(rate,4)}（固定レート・タップで変更）
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Normal({S,setS,say,onEditRate,cat,setCat}){
+  const n=S.members.length;
+  const [amt,setAmt]=useState('');
+  const [tg,setTg]=useState(S.members.map(()=>true));
+  const [memo,setMemo]=useState('');
+  const [showMemo,setShowMemo]=useState(false);
+  const rate=S.rates[S.curr]||1;
+  const val=parseFloat(amt)||0;
+  const jpy=Math.round(val*rate);
+  const cnt=tg.filter(Boolean).length;
+  const press=k=>{
+    try{navigator.vibrate&&navigator.vibrate(8)}catch(e){}
+    setAmt(a=>{
+      if(k==='⌫')return a.slice(0,-1);
+      if(k==='.')return a.includes('.')?a:(a===''?'0.':a+'.');
+      if(k==='00'&&(a===''||a==='0'))return a;
+      const nx=(a==='0'&&k!=='00')?k:a+k;
+      if(/\.\d{3,}/.test(nx))return a;
+      if(nx.replace('.','').length>10)return a;
+      return nx;
+    });
+  };
+  const disp=amt===''?'0':(()=>{const [i,d]=amt.split('.');return Number(i).toLocaleString('ja-JP')+(d!==undefined?'.'+d:'')})();
+  const allOn=cnt===n;
+  const register=()=>{
+    if(!(jpy>=1)||cnt===0)return;
+    const idx=tg.map((t,i)=>t?i:-1).filter(i=>i>=0);
+    const al=allocate(jpy,idx.map(()=>1));
+    const shares=S.members.map(()=>0);idx.forEach((i,k)=>{shares[i]=al[k]});
+    const e={id:uid(),ts:Date.now(),type:'normal',payer:S.lastPayer,amount:val,cur:S.curr,rate,jpy,shares,cat,memo:memo.trim()};
+    setS(s=>({...s,expenses:[...s.expenses,e]}));
+    say(`✅ ${yen(jpy)} を記録しました`);
+    setAmt('');setTg(S.members.map(()=>true));setCat('');setMemo('');setShowMemo(false);
+  };
+  const keys=['1','2','3','4','5','6','7','8','9','.','0','⌫'];
+  return (
+    <div className="space-y-4">
+      <div className="bg-ink rounded-3xl p-4 text-right">
+        <div className="text-white/60 text-sm font-bold flex justify-between">
+          <span>{S.members[S.lastPayer]}が立替</span><span>{S.curr}</span>
+        </div>
+        <div className="text-lime font-black leading-tight break-all" style={{fontSize:disp.length>9?36:48}}>{sym(S.curr)}{disp}</div>
+        <div className="text-white/70 text-sm font-bold h-5">{S.curr!=='JPY'&&val>0?`≒ ${yen(jpy)}`:''}</div>
+      </div>
+
+      {showMemo
+        ?<input value={memo} onChange={e=>setMemo(e.target.value)} placeholder="メモ（任意）" className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold bg-white"/>
+        :<button onClick={()=>setShowMemo(true)} className="text-sm font-bold text-ink/60 underline decoration-dotted">📝 メモを追加（任意）</button>}
+
+      <div>
+        <p className="text-sm font-bold text-ink/60 mb-1.5">払った人</p>
+        <div className="flex gap-2 overflow-x-auto noscroll -mx-4 px-4">
+          {S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={S.lastPayer===i} onClick={()=>setS(s=>({...s,lastPayer:i}))}/>)}
+        </div>
+      </div>
+
+      <div>
+        <p className="text-sm font-bold text-ink/60 mb-1.5">割る人{val>0&&cnt>0&&<span className="ml-2 text-ink">1人あたり約{yen(jpy/cnt)}</span>}</p>
+        <div className="flex gap-2 overflow-x-auto noscroll -mx-4 px-4">
+          <Chip on={allOn} onClick={()=>setTg(S.members.map(()=>true))}>全員</Chip>
+          {S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={tg[i]} onClick={()=>setTg(t=>t.map((v,j)=>j===i?!v:v))}/>)}
+        </div>
+      </div>
+
+      <CurrencyRow S={S} setS={setS} onEditRate={onEditRate}/>
+
+      <div className="grid grid-cols-3 gap-2.5">
+        {keys.map(k=>(
+          <button key={k} onClick={()=>press(k)} className="h-16 rounded-2xl bg-white border-2 border-ink text-[26px] font-black keyshadow nosel">{k}</button>
+        ))}
+      </div>
+      <Btn onClick={register} disabled={!(jpy>=1)||cnt===0}>
+        {jpy>=1?`記録する（${yen(jpy)}）`:'金額を入力してください'}
+      </Btn>
+    </div>
+  );
+}
+
+/* ============ 入力：レストラン（傾斜割り勘） ============ */
+function Resto({S,setS,say,onEditRate,setCat}){
+  const n=S.members.length;
+  const [ind,setInd]=useState(S.members.map(()=>''));
+  const [sharedAmt,setSharedAmt]=useState('');
+  const [sharers,setSharers]=useState(S.members.map(()=>true));
+  const [tipMode,setTipMode]=useState('15');
+  const [custom,setCustom]=useState('');
+  const [memo,setMemo]=useState('');
+  const rate=S.rates[S.curr]||1;
+  const tip=tipMode==='custom'?(parseFloat(custom)||0):Number(tipMode);
+  const calc=useMemo(()=>{
+    const indN=ind.map(x=>parseFloat(x)||0);
+    const sh=parseFloat(sharedAmt)||0;
+    const sIdx=sharers.map((t,i)=>t?i:-1).filter(i=>i>=0);
+    const sub=indN.map((v,i)=>v+(sharers[i]&&sh>0&&sIdx.length?sh/sIdx.length:0));
+    const fin=sub.map(v=>v*(1+tip/100));
+    const total=fin.reduce((a,b)=>a+b,0);
+    const jpy=Math.round(total*rate);
+    const shares=allocate(jpy,fin);
+    return {indN,sh,sIdx,sub,fin,total,jpy,shares,bad:sh>0&&sIdx.length===0};
+  },[ind,sharedAmt,sharers,tip,rate]);
+  const ok=calc.jpy>=1&&!calc.bad;
+  const register=()=>{
+    if(!ok)return;
+    const e={id:uid(),ts:Date.now(),type:'resto',payer:S.lastPayer,amount:Math.round(calc.total*100)/100,cur:S.curr,rate,jpy:calc.jpy,shares:calc.shares,cat:RESTO,memo:memo.trim(),detail:{ind:calc.indN,shared:calc.sh,tip}};
+    setS(s=>({...s,expenses:[...s.expenses,e]}));
+    say(`✅ ${yen(calc.jpy)} を傾斜割りで登録しました`);
+    setInd(S.members.map(()=>''));setSharedAmt('');setSharers(S.members.map(()=>true));setMemo('');setCat('');
+  };
+  const tips=[['0','なし'],['10','10%'],['15','15%'],['18','18%'],['20','20%'],['custom','手入力']];
+  return (
+    <div className="space-y-4">
+      <Card className="bg-sun/30 border-sun">
+        <p className="font-bold text-sm leading-relaxed">🍽️ 各自が頼んだ分を入力 → みんなでシェアした分とチップ・税を自動で按分します。頼んでない人は空欄でOK。</p>
+      </Card>
+      <div>
+        <p className="text-sm font-bold text-ink/60 mb-1.5">払った人</p>
+        <div className="flex gap-2 overflow-x-auto noscroll -mx-4 px-4">
+          {S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={S.lastPayer===i} onClick={()=>setS(s=>({...s,lastPayer:i}))}/>)}
+        </div>
+      </div>
+      <CurrencyRow S={S} setS={setS} onEditRate={onEditRate}/>
+
+      <Card>
+        <p className="font-black mb-2">各自の個別注文額（{S.curr}）</p>
+        <div className="space-y-2">
+          {S.members.map((_,i)=>(
+            <div key={i} className="flex items-center gap-2">
+              <div className="w-20 flex items-center gap-2 font-bold truncate"><Dot i={i}/><span className="truncate">{S.members[i]}</span></div>
+              <input inputMode="decimal" value={ind[i]} placeholder="0"
+                onChange={e=>setInd(a=>a.map((v,j)=>j===i?e.target.value.replace(/[^0-9.]/g,''):v))}
+                className="flex-1 min-w-0 h-12 rounded-xl border-2 border-ink/20 px-3 text-lg font-black text-right bg-paper"/>
+              <div className="w-24 text-right text-xs font-bold text-ink/60 leading-tight">
+                {calc.fin[i]>0&&<><div className="text-sm text-ink">{sym(S.curr)}{fmtNum(calc.fin[i])}</div><div>{yen(calc.shares[i])}</div></>}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-black mb-2">みんなでシェアした料理の合計（{S.curr}）</p>
+        <input inputMode="decimal" value={sharedAmt} placeholder="0" onChange={e=>setSharedAmt(e.target.value.replace(/[^0-9.]/g,''))}
+          className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 text-lg font-black text-right bg-paper"/>
+        <p className="text-sm font-bold text-ink/60 mt-3 mb-1.5">シェアに参加した人{calc.bad&&<span className="text-bad ml-2">1人以上選んでください</span>}</p>
+        <div className="flex gap-2 flex-wrap">
+          {S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={sharers[i]} onClick={()=>setSharers(t=>t.map((v,j)=>j===i?!v:v))}/>)}
+        </div>
+      </Card>
+
+      <Card>
+        <p className="font-black mb-2">チップ・税金・サービス料</p>
+        <div className="flex gap-2 flex-wrap">
+          {tips.map(([k,l])=><Chip key={k} on={tipMode===k} onClick={()=>setTipMode(k)}>{l}</Chip>)}
+        </div>
+        {tipMode==='custom'&&(
+          <div className="flex items-center gap-2 mt-3">
+            <input inputMode="decimal" value={custom} placeholder="例: 12.5" onChange={e=>setCustom(e.target.value.replace(/[^0-9.]/g,''))}
+              className="flex-1 h-12 rounded-xl border-2 border-ink/20 px-3 text-lg font-black text-right bg-paper"/>
+            <span className="font-black text-lg">%</span>
+          </div>
+        )}
+      </Card>
+
+      <input value={memo} onChange={e=>setMemo(e.target.value)} placeholder="お店の名前など（任意）" className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold bg-white"/>
+
+      <div className="bg-ink text-white rounded-3xl p-4">
+        <div className="flex justify-between items-baseline">
+          <span className="font-bold text-white/70">合計（チップ込み）</span>
+          <span className="text-2xl font-black text-lime">{sym(S.curr)}{fmtNum(calc.total)}</span>
+        </div>
+        <div className="text-right text-white/70 font-bold text-sm">{yen(calc.jpy)}</div>
+      </div>
+      <Btn onClick={register} disabled={!ok}>まとめて登録する</Btn>
+    </div>
+  );
+}
+
+function AddTab(props){
+  const [cat,setCat]=useState('');
+  const S=props.S;
+  const isResto=cat===RESTO;
+  return (
+    <div className="space-y-4">
+      <div>
+        <p className="text-sm font-bold text-ink/60 mb-1.5">費目{isResto&&<span className="ml-2 text-ink">🍽️ 傾斜割り勘モード</span>}</p>
+        <div className="flex gap-2 overflow-x-auto noscroll -mx-4 px-4">
+          {S.cats.map(c=><Chip key={c.k} on={cat===c.k} onClick={()=>setCat(cat===c.k?'':c.k)}>{c.e} {c.k}</Chip>)}
+        </div>
+      </div>
+      {/* 両方マウントしたまま切り替え（入力途中の内容を保持） */}
+      <div className={isResto?'hidden':''}><Normal {...props} cat={cat} setCat={setCat}/></div>
+      <div className={isResto?'':'hidden'}><Resto {...props} setCat={setCat}/></div>
+    </div>
+  );
+}
+
+/* ============ ホーム ============ */
+function Home({S,bal,go}){
+  const total=S.expenses.reduce((a,e)=>a+e.jpy,0);
+  const paid=S.members.map((_,i)=>S.expenses.filter(e=>e.payer===i).reduce((a,e)=>a+e.jpy,0));
+  const owed=S.members.map((_,i)=>S.expenses.reduce((a,e)=>a+(e.shares[i]||0),0));
+  const byCat={};S.expenses.forEach(e=>{const k=e.cat||'その他';byCat[k]=(byCat[k]||0)+e.jpy});
+  const cats=Object.entries(byCat).sort((a,b)=>b[1]-a[1]);
+  const lb=S.lastBackup;
+  const newer=lb?S.expenses.filter(e=>e.ts>lb.ts).length:S.expenses.length;
+  return (
+    <div className="space-y-5">
+      <div className="relative bg-ink text-white rounded-[28px] p-5 overflow-hidden">
+        <div className="text-sm text-white/70 font-bold">{S.tripName}｜みんなの総支出</div>
+        <div className="text-[44px] leading-none font-black mt-2 text-lime">{yen(total)}</div>
+        <div className="relative my-4">
+          <div className="border-t-2 border-dashed border-white/25"/>
+          <span className="absolute -left-8 -top-3 w-6 h-6 rounded-full bg-paper"/>
+          <span className="absolute -right-8 -top-3 w-6 h-6 rounded-full bg-paper"/>
+        </div>
+        <div className="flex justify-between text-sm font-bold text-white/80">
+          <span>{S.expenses.length}件の支出</span>
+          <span>1人あたり約{yen(total/S.members.length)}</span>
+        </div>
+        <button onClick={()=>go('add')} className="mt-4 w-full h-14 rounded-2xl bg-lime text-ink font-black text-[17px] border-2 border-lime nosel active:scale-[.98]">＋ 支出を入力する</button>
+      </div>
+
+      <div>
+        <H sub="＋は払いすぎ（もらう側）、−は不足（払う側）">立替バランス</H>
+        <div className="space-y-2.5">
+          {S.members.map((m,i)=>{
+            const b=bal[i];
+            return (
+              <div key={i} className="bg-white rounded-2xl border-2 border-ink/10 p-3 flex items-center gap-3" style={{borderLeft:`8px solid ${COLORS[i%COLORS.length]}`}}>
+                <Avatar S={S} i={i}/>
+                <div className="flex-1 min-w-0">
+                  <div className="font-black truncate">{m}{S.me===i&&<span className="ml-2 text-xs bg-ink text-lime rounded-full px-2 py-0.5">自分</span>}</div>
+                  <div className="text-xs font-bold text-ink/55">立替 {yen(paid[i])}／負担 {yen(owed[i])}</div>
+                </div>
+                <div className={`text-right font-black text-xl ${b>0?'text-good':b<0?'text-bad':'text-ink/50'}`}>
+                  {signedYen(b)}
+                  <div className="text-xs font-bold">{b>0?'払いすぎ':b<0?'不足':'イーブン'}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {cats.length>0&&(
+        <Card>
+          <H>使い道</H>
+          <div className="space-y-2">
+            {cats.map(([k,v])=>(
+              <div key={k}>
+                <div className="flex justify-between text-sm font-bold"><span>{catEmoji(S,k)} {k}</span><span>{yen(v)}</span></div>
+                <div className="h-2.5 rounded-full bg-ink/10 mt-1"><div className="h-full rounded-full bg-ink" style={{width:Math.max(4,v/total*100)+'%'}}/></div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
+      <button onClick={()=>go('more')} className={`w-full text-left rounded-2xl p-4 border-2 ${newer>0?'bg-sun/30 border-sun':'bg-good/10 border-good/40'}`}>
+        <div className="font-black">{newer>0?'🛟 バックアップしておこう':'✅ バックアップ済み'}</div>
+        <div className="text-sm font-bold text-ink/70 mt-0.5">
+          {lb?`最終 ${ago(lb.ts)}`:'まだバックアップしていません'}{newer>0&&lb?`／その後 ${newer}件追加`:''}
+        </div>
+      </button>
+    </div>
+  );
+}
+
+/* ============ 履歴 ============ */
+function EditModal({S,e,onSave,onClose}){
+  const [payer,setPayer]=useState(e.payer);
+  const [cat,setCat]=useState(e.cat||'');
+  const [memo,setMemo]=useState(e.memo||'');
+  const [cur,setCur]=useState(e.cur);
+  const [amt,setAmt]=useState(String(e.amount));
+  const [tg,setTg]=useState(e.shares.map(s=>s>0));
+  const isN=e.type==='normal';
+  const curs=[...new Set([...S.active,e.cur])];
+  const editCats=(!e.cat||S.cats.some(c=>c.k===e.cat))?S.cats:[...S.cats,{k:e.cat,e:'🧾'}];
+  const v=parseFloat(amt)||0;
+  const valid=!isN||(v>0&&tg.some(Boolean));
+  const save=()=>{
+    let u={...e,payer,cat,memo:memo.trim()};
+    if(isN){
+      const rate=cur===e.cur?e.rate:(S.rates[cur]||1);
+      const jpy=Math.round(v*rate);
+      const idx=tg.map((t,i)=>t?i:-1).filter(i=>i>=0);
+      const al=allocate(jpy,idx.map(()=>1));
+      const shares=S.members.map(()=>0);idx.forEach((i,k)=>{shares[i]=al[k]});
+      u={...u,amount:v,cur,rate,jpy,shares};
+    }
+    onSave(u);
+  };
+  return (
+    <Modal>
+      <h3 className="text-xl font-black mb-3">支出を編集</h3>
+      <div className="space-y-4">
+        {isN?(
+          <>
+            <div>
+              <p className="text-sm font-bold text-ink/60 mb-1">金額</p>
+              <input inputMode="decimal" value={amt} onChange={x=>setAmt(x.target.value.replace(/[^0-9.]/g,''))} className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 text-lg font-black text-right bg-paper"/>
+              <div className="flex gap-2 flex-wrap mt-2">{curs.map(c=><Chip key={c} on={cur===c} onClick={()=>setCur(c)}>{c}</Chip>)}</div>
+              <p className="text-xs font-bold text-ink/55 mt-1">{cur===e.cur?`この支出のレート 1${cur}=¥${fmtNum(e.rate,4)} を使用`:`現在のレート 1${cur}=¥${fmtNum(S.rates[cur]||1,4)} を使用`}</p>
+            </div>
+            <div>
+              <p className="text-sm font-bold text-ink/60 mb-1">割る人</p>
+              <div className="flex gap-2 flex-wrap">{S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={tg[i]} onClick={()=>setTg(t=>t.map((x,j)=>j===i?!x:x))}/>)}</div>
+            </div>
+          </>
+        ):(
+          <Card className="bg-sun/30 border-sun"><p className="text-sm font-bold">🍽️ レストラン明細の金額は編集できません。直したい場合は削除して入れ直してください。</p></Card>
+        )}
+        <div>
+          <p className="text-sm font-bold text-ink/60 mb-1">払った人</p>
+          <div className="flex gap-2 flex-wrap">{S.members.map((_,i)=><MemberChip key={i} S={S} i={i} on={payer===i} onClick={()=>setPayer(i)}/>)}</div>
+        </div>
+        <div>
+          <p className="text-sm font-bold text-ink/60 mb-1">カテゴリ</p>
+          <div className="flex gap-2 flex-wrap">{editCats.map(c=><Chip key={c.k} on={cat===c.k} onClick={()=>setCat(cat===c.k?'':c.k)}>{c.e} {c.k}</Chip>)}</div>
+        </div>
+        <input value={memo} onChange={x=>setMemo(x.target.value)} placeholder="メモ" className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+      </div>
+      <div className="grid grid-cols-2 gap-3 mt-5">
+        <Btn kind="ghost" onClick={onClose}>キャンセル</Btn>
+        <Btn kind="dark" disabled={!valid} onClick={save}>保存へ進む</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function History({S,setS,say,snap}){
+  const [edit,setEdit]=useState(null);
+  const [draft,setDraft]=useState(null);
+  const [del,setDel]=useState(null);
+  const list=[...S.expenses].sort((a,b)=>b.ts-a.ts);
+  let last='';
+  if(!list.length)return (
+    <div className="text-center py-16"><div className="text-5xl mb-3">🧾</div><p className="font-black text-lg">まだ支出がありません</p><p className="text-ink/60 mt-1">「入力」タブから最初の1件を記録しよう</p></div>
+  );
+  return (
+    <div className="space-y-3">
+      <H sub={`${list.length}件・新しい順`}>履歴</H>
+      {list.map(e=>{
+        const d=fmtDate(e.ts), head=d!==last; last=d;
+        const tIdx=e.shares.map((s,i)=>s>0?i:-1).filter(i=>i>=0);
+        return (
+          <React.Fragment key={e.id}>
+            {head&&<div className="pt-2 text-sm font-black text-ink/60">{d}</div>}
+            <Card className="!p-3.5">
+              <div className="flex items-start gap-3">
+                <div className="text-2xl w-10 h-10 rounded-xl bg-paper flex items-center justify-center shrink-0">{catEmoji(S,e.cat)}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <div className="font-black truncate">{e.memo||e.cat||'支出'}{e.type==='resto'&&<span className="ml-2 text-xs bg-sun rounded-full px-2 py-0.5">傾斜</span>}</div>
+                    <div className="font-black text-lg shrink-0">{yen(e.jpy)}</div>
+                  </div>
+                  <div className="text-xs font-bold text-ink/55 mt-0.5">
+                    {fmtTime(e.ts)}・{S.members[e.payer]}が立替{e.cur!=='JPY'&&`・${sym(e.cur)}${fmtNum(e.amount)}`}
+                  </div>
+                  <div className="flex gap-1 mt-1.5 flex-wrap">
+                    {tIdx.length===S.members.length?<span className="text-xs font-bold bg-ink/5 rounded-full px-2 py-0.5">全員</span>
+                      :tIdx.map(i=><span key={i} className="text-xs font-bold bg-ink/5 rounded-full px-2 py-0.5 inline-flex items-center gap-1"><Dot i={i} size={8}/>{S.members[i]}</span>)}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-3">
+                <button onClick={()=>setEdit(e)} className="h-10 rounded-xl border-2 border-ink/15 font-bold text-sm">✏️ 編集</button>
+                <button onClick={()=>setDel(e)} className="h-10 rounded-xl border-2 border-bad/30 text-bad font-bold text-sm">🗑️ 削除</button>
+              </div>
+            </Card>
+          </React.Fragment>
+        );
+      })}
+      {edit&&!draft&&<EditModal S={S} e={edit} onClose={()=>setEdit(null)} onSave={u=>setDraft(u)}/>}
+      {draft&&<TwoStep title="この内容で保存しますか？" lines={[`${yen(draft.jpy)}（${S.members[draft.payer]}が立替）に変更します。`,'保存すると全員のバランスが再計算されます。']} okLabel="保存する"
+        onCancel={()=>setDraft(null)}
+        onOk={()=>{snap();setS(s=>({...s,expenses:s.expenses.map(x=>x.id===draft.id?draft:x)}));setDraft(null);setEdit(null);say('✅ 保存しました')}}/>}
+      {del&&<TwoStep title="この支出を削除しますか？" lines={[`「${del.memo||del.cat||'支出'}」${yen(del.jpy)} を履歴から消します。`,'削除すると精算額も変わります。（「その他」→「直前の状態に戻す」で1回だけ取り消せます）']} okLabel="削除する"
+        onCancel={()=>setDel(null)}
+        onOk={()=>{snap();setS(s=>({...s,expenses:s.expenses.filter(x=>x.id!==del.id)}));setDel(null);say('🗑️ 削除しました')}}/>}
+    </div>
+  );
+}
+
+/* ============ 精算 ============ */
+function Settle({S,bal,tr,say}){
+  const total=S.expenses.reduce((a,e)=>a+e.jpy,0);
+  const copy=async t=>{say((await copyText(t))?'📋 コピーしました。LINEに貼り付けてね':'コピーできませんでした')};
+  return (
+    <div className="space-y-4">
+      <H sub="この通りに送れば、最少の送金回数で全員イーブンになります">精算</H>
+      {S.expenses.length===0&&<p className="text-ink/60 font-bold">まだ支出がありません。</p>}
+      {S.expenses.length>0&&tr.length===0&&(
+        <Card className="text-center bg-good/10 border-good/40"><div className="text-4xl">🎉</div><p className="font-black text-lg mt-1">全員イーブン！送金は不要です</p></Card>
+      )}
+      {tr.length>0&&<p className="font-black">送金は全部で{tr.length}回</p>}
+      <div className="space-y-3">
+        {tr.map((t,k)=>(
+          <div key={k} className={`rounded-3xl border-2 border-ink p-4 bg-white keyshadow ${t.from===S.me?'ring-4 ring-lime':''}`}>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-col items-center w-16"><Avatar S={S} i={t.from} size={44}/><span className="text-sm font-black mt-1 truncate max-w-full">{S.members[t.from]}</span></div>
+              <div className="flex-1 text-center">
+                <div className="text-2xl font-black">{yen(t.amt)}</div>
+                <div className="text-ink/40 font-black text-xl leading-none">➔</div>
+              </div>
+              <div className="flex flex-col items-center w-16"><Avatar S={S} i={t.to} size={44}/><span className="text-sm font-black mt-1 truncate max-w-full">{S.members[t.to]}</span></div>
+            </div>
+            {t.from===S.me&&<p className="text-center text-sm font-black mt-2">👉 あなたが払う分です</p>}
+            {t.to===S.me&&<p className="text-center text-sm font-black mt-2">👉 あなたがもらう分です</p>}
+          </div>
+        ))}
+      </div>
+      <Card>
+        <div className="flex justify-between font-bold"><span>総支出</span><span>{yen(total)}</span></div>
+        <div className="flex justify-between font-bold mt-1"><span>1人あたり</span><span>約{yen(total/S.members.length)}</span></div>
+      </Card>
+      <Btn onClick={()=>copy(settleText(S,tr))} disabled={!S.expenses.length}>💬 精算結果をLINE用にコピー</Btn>
+      <Btn kind="ghost" onClick={()=>copy(statusText(S,bal,tr))} disabled={!S.expenses.length}>📊 現在の立替状況をコピー</Btn>
+    </div>
+  );
+}
+
+/* ============ その他（バックアップ／設定／ヘルプ） ============ */
+function Acc({title,children}){
+  const [o,setO]=useState(false);
+  return (
+    <div className="bg-white rounded-2xl border-2 border-ink/10 overflow-hidden">
+      <button onClick={()=>setO(!o)} className="w-full flex justify-between items-center px-4 h-14 font-black text-left"><span>{title}</span><span className={`transition-transform ${o?'rotate-180':''}`}>⌄</span></button>
+      {o&&<div className="px-4 pb-4 text-[15px] leading-relaxed text-ink/80 space-y-2">{children}</div>}
+    </div>
+  );
+}
+
+function parseBackup(text){
+  const a=text.indexOf('{'), b=text.lastIndexOf('}');
+  if(a<0||b<=a)throw new Error('コードが見つかりません');
+  const o=JSON.parse(text.slice(a,b+1));
+  if(o.app!=='tabiwari'||!Array.isArray(o.expenses)||!Array.isArray(o.members))throw new Error('たびわりのバックアップではありません');
+  const n=o.members.length;
+  o.expenses.forEach(e=>{
+    if(typeof e.id!=='string'||typeof e.jpy!=='number'||!Array.isArray(e.shares)||e.shares.length!==n||!(e.payer>=0&&e.payer<n))throw new Error('データの形式が正しくありません');
+  });
+  return o;
+}
+
+function More({S,setS,say,snap,onReset}){
+  const [pasted,setPasted]=useState('');
+  const [pending,setPending]=useState(null);
+  const [replaceAsk,setReplaceAsk]=useState(false);
+  const [codeShown,setCodeShown]=useState('');
+  const [newCode,setNewCode]=useState('');const [newRate,setNewRate]=useState('');
+  const fileRef=useRef();
+  const hasPrev=!!store.get(PREV);
+
+  const makeCode=()=>JSON.stringify({app:'tabiwari',v:1,exportedAt:Date.now(),tripName:S.tripName,members:S.members,rates:S.rates,active:S.active,cats:S.cats,expenses:S.expenses});
+  const markBackup=()=>setS(s=>({...s,lastBackup:{ts:Date.now()}}));
+  const copyCode=async()=>{
+    const c=makeCode();
+    if(await copyText(c)){markBackup();say('📋 コピーしました！LINEのトークに貼って送ろう')}
+    else{setCodeShown(c);say('自動コピー不可。下のコードを手動でコピーしてね')}
+  };
+  const download=()=>{
+    try{
+      const d=new Date(),p=x=>String(x).padStart(2,'0');
+      const blob=new Blob([makeCode()],{type:'application/json'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download=`tabiwari-backup-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.json`;
+      document.body.appendChild(a);a.click();document.body.removeChild(a);
+      markBackup();say('⬇️ ファイルを保存しました');
+    }catch(e){say('ダウンロードできませんでした。コードのコピーを使ってね')}
+  };
+  const tryParse=text=>{try{setPending(parseBackup(text))}catch(e){say('⚠️ '+e.message)}};
+  const onFile=ev=>{
+    const f=ev.target.files&&ev.target.files[0];if(!f)return;
+    const r=new FileReader();r.onload=()=>tryParse(String(r.result));r.readAsText(f);ev.target.value='';
+  };
+  const doMerge=o=>{
+    snap();
+    const have=new Set(S.expenses.map(e=>e.id));
+    const add=o.expenses.filter(e=>!have.has(e.id));
+    setS(s=>{const names=new Set(s.cats.map(c=>c.k));const extra=(o.cats||[]).filter(c=>c&&c.k&&!names.has(c.k));return {...s,cats:[...s.cats,...extra],expenses:[...s.expenses,...add].sort((a,b)=>a.ts-b.ts)}});
+    setPending(null);setPasted('');say(`➕ ${add.length}件を追加しました（重複${o.expenses.length-add.length}件はスキップ）`);
+  };
+  const doReplace=o=>{
+    snap();
+    setS(s=>({...s,tripName:o.tripName||s.tripName,members:o.members,rates:o.rates||s.rates,active:o.active||s.active,cats:(o.cats&&o.cats.some(c=>c.k===RESTO))?o.cats:(o.cats?[DEFAULT_CATS[0],...o.cats]:s.cats),expenses:o.expenses,setup:true,lastBackup:{ts:Date.now()}}));
+    setPending(null);setReplaceAsk(false);setPasted('');say('♻️ 復元しました');
+  };
+  const restorePrev=()=>{
+    try{const p=JSON.parse(store.get(PREV));setS(s=>({...p.data,me:s.me}));say('↩️ 直前の状態に戻しました')}catch(e){say('戻せるデータがありません')}
+  };
+  const [catName,setCatName]=useState('');const [catEmo,setCatEmo]=useState('');
+  const addCat=()=>{
+    const k=catName.trim();
+    if(!k){say('費目の名前を入れてね');return}
+    if(S.cats.some(c=>c.k===k)){say('同じ名前の費目があります');return}
+    setS(s=>({...s,cats:[...s.cats,{k,e:(catEmo.trim()||'🏷️')}]}));
+    setCatName('');setCatEmo('');say(`「${k}」を追加しました`);
+  };
+  const addCurrency=()=>{
+    const c=newCode.trim().toUpperCase(), r=parseFloat(newRate);
+    if(!/^[A-Z]{3}$/.test(c)||!(r>0)){say('通貨コード（3文字）とレートを入れてね');return}
+    setS(s=>({...s,rates:{...s.rates,[c]:r},active:s.active.includes(c)?s.active:[...s.active,c]}));
+    setNewCode('');setNewRate('');say(`${c} を追加しました`);
+  };
+
+  const lost=pending?S.expenses.filter(e=>!pending.expenses.some(x=>x.id===e.id)).length:0;
+  const pendTotal=pending?pending.expenses.reduce((a,e)=>a+e.jpy,0):0;
+  const canMerge=pending&&pending.members.length===S.members.length;
+
+  return (
+    <div className="space-y-6">
+      <section className="space-y-3">
+        <H sub="誰かのスマホが壊れても、コードを貼れば元通り">🛟 バックアップと復元</H>
+        <Btn onClick={copyCode}>📋 バックアップコードをコピー</Btn>
+        {codeShown&&<textarea readOnly value={codeShown} onFocus={e=>e.target.select()} className="w-full h-28 rounded-xl border-2 border-ink/20 p-2 text-xs font-mono"/>}
+        <div className="grid grid-cols-2 gap-3">
+          <Btn kind="ghost" onClick={download} className="!text-[15px]">⬇️ JSONを保存</Btn>
+          <Btn kind="ghost" onClick={()=>fileRef.current&&fileRef.current.click()} className="!text-[15px]">⬆️ ファイルを読み込む</Btn>
+        </div>
+        <input ref={fileRef} type="file" accept=".json,.txt,application/json,text/plain" className="hidden" onChange={onFile}/>
+        <Card>
+          <p className="font-black mb-2">コードを貼り付けて読み込む</p>
+          <textarea value={pasted} onChange={e=>setPasted(e.target.value)} placeholder="LINEで受け取ったバックアップコードをここに貼り付け" className="w-full h-24 rounded-xl border-2 border-ink/20 p-2 text-sm bg-paper"/>
+          <Btn kind="dark" className="mt-2 !h-12" disabled={!pasted.trim()} onClick={()=>tryParse(pasted)}>コードを読み込む</Btn>
+        </Card>
+        <Card className="bg-sky/15 border-sky/50">
+          <p className="font-black mb-1">読み込んだあとの選び方</p>
+          <p className="text-sm font-bold leading-relaxed">コードを読み込むと、次の画面で2択になります。</p>
+          <p className="text-sm font-bold leading-relaxed mt-1">➕ <span className="font-black">統合</span>：いまのデータは残して、足りない支出だけ追加。みんなのコードを集める人はこちら。</p>
+          <p className="text-sm font-bold leading-relaxed mt-1">♻️ <span className="font-black">上書き復元</span>：いまのデータを、コードの内容に置き換え。集めた人から配られたコードを受け取る人はこちら。</p>
+        </Card>
+        {hasPrev&&<Btn kind="ghost" onClick={restorePrev}>↩️ 直前の状態に戻す（1回分）</Btn>}
+        <p className="text-sm text-ink/60 font-bold">最終バックアップ：{S.lastBackup?ago(S.lastBackup.ts):'まだなし'}</p>
+      </section>
+
+      <section className="space-y-3">
+        <H>⚙️ 設定</H>
+        <Card>
+          <p className="font-black mb-2">旅の名前</p>
+          <input value={S.tripName} maxLength={20} onChange={e=>setS(s=>({...s,tripName:e.target.value}))} className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+          <p className="font-black mt-4 mb-2">メンバー名（共有端末ごとに「自分」を選択）</p>
+          <div className="space-y-2">
+            {S.members.map((m,i)=>(
+              <div key={i} className="flex gap-2 items-center">
+                <Dot i={i} size={14}/>
+                <input value={m} maxLength={8} onChange={e=>setS(s=>({...s,members:s.members.map((x,j)=>j===i?e.target.value:x)}))} className="flex-1 min-w-0 h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+                <button onClick={()=>setS(s=>({...s,me:i}))} className={`h-12 px-3 rounded-xl font-black border-2 ${S.me===i?'bg-ink text-lime border-ink':'bg-white border-ink/15'}`}>自分</button>
+              </div>
+            ))}
+          </div>
+        </Card>
+        <Card>
+          <p className="font-black mb-1">費目</p>
+          <p className="text-xs font-bold text-ink/55 mb-2">入力画面に並ぶチップです。「レストラン」を選ぶと傾斜割り勘の画面になるため、削除できません。費目を削除しても、過去の記録は残ります。</p>
+          <div className="space-y-2">
+            {S.cats.map(c=>(
+              <div key={c.k} className="flex items-center gap-2">
+                <span className="w-10 h-10 rounded-xl bg-paper flex items-center justify-center text-xl">{c.e}</span>
+                <span className="flex-1 font-black truncate">{c.k}</span>
+                {c.k===RESTO
+                  ?<span className="text-xs font-bold text-ink/50 px-2">固定</span>
+                  :<button onClick={()=>setS(s=>({...s,cats:s.cats.filter(x=>x.k!==c.k)}))} className="h-10 px-3 rounded-xl border-2 border-bad/30 text-bad font-bold text-sm">削除</button>}
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2 mt-3">
+            <input value={catEmo} maxLength={4} onChange={e=>setCatEmo(e.target.value)} placeholder="🏷️" className="w-16 h-11 rounded-xl border-2 border-ink/20 px-2 font-bold text-center text-xl"/>
+            <input value={catName} maxLength={10} onChange={e=>setCatName(e.target.value)} placeholder="例: お土産" className="flex-1 min-w-0 h-11 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+            <button onClick={addCat} className="h-11 px-4 rounded-xl bg-ink text-lime font-black">追加</button>
+          </div>
+        </Card>
+        <Card>
+          <p className="font-black mb-1">通貨とレート（固定）</p>
+          <p className="text-xs font-bold text-ink/55 mb-2">レートを変えても、過去の記録は記録時のレートのままです。チェックした通貨が入力画面に並びます。</p>
+          <div className="space-y-2">
+            {Object.keys(S.rates).map(c=>(
+              <div key={c} className="flex items-center gap-2">
+                <input type="checkbox" checked={S.active.includes(c)} disabled={c==='JPY'} onChange={e=>setS(s=>({...s,active:e.target.checked?[...s.active,c]:s.active.filter(x=>x!==c),curr:(!e.target.checked&&s.curr===c)?'JPY':s.curr}))} className="w-6 h-6 accent-ink"/>
+                <span className="w-14 font-black">{c}</span>
+                <span className="text-sm font-bold text-ink/60">¥</span>
+                <input inputMode="decimal" disabled={c==='JPY'} value={S.rates[c]} onChange={e=>{const v=e.target.value.replace(/[^0-9.]/g,'');setS(s=>({...s,rates:{...s.rates,[c]:v}}))}} onBlur={()=>setS(s=>({...s,rates:{...s.rates,[c]:parseFloat(s.rates[c])>0?parseFloat(s.rates[c]):(DEFAULT_RATES[c]||1)}}))} className="flex-1 min-w-0 h-11 rounded-xl border-2 border-ink/20 px-3 font-bold text-right disabled:bg-paper"/>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2 mt-3">
+            <input value={newCode} maxLength={3} onChange={e=>setNewCode(e.target.value.toUpperCase())} placeholder="例: VND" className="w-24 h-11 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+            <input inputMode="decimal" value={newRate} onChange={e=>setNewRate(e.target.value.replace(/[^0-9.]/g,''))} placeholder="1通貨=○円" className="flex-1 min-w-0 h-11 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+            <button onClick={addCurrency} className="h-11 px-4 rounded-xl bg-ink text-lime font-black">追加</button>
+          </div>
+        </Card>
+      </section>
+
+      <section className="space-y-2.5">
+        <H>📖 使い方ガイド</H>
+        <Acc title="🧭 基本ルール">
+          <p>① 払った人が、払った直後に金額を入れて「記録する」。</p>
+          <p>② 割る人は最初から全員。外したい人だけタップ。</p>
+          <p>③ 帰国後に「精算」タブを開けば、最少の送金回数が出ます。</p>
+          <p>通貨とレートは1度選べば保持されます。レートはタップで変更できます。</p>
+        </Acc>
+        <Acc title="🍽️ レストランの計算例">
+          <p>入力タブで費目「レストラン」を選ぶと、傾斜割り勘の画面に切り替わります。費目は設定から増やせます。</p>
+          <p>4人で食事。A=15、B=20、C=12、D=13を入力。</p>
+          <p>みんなでシェアしたピザ40を全員で割り、チップ15%を選ぶと…</p>
+          <p>A＝(15＋10)×1.15＝28.75／B＝(20＋10)×1.15＝34.5／C＝25.3／D＝26.45。合計115を円換算して「まとめて登録」で1件にまとまります。</p>
+          <p>円換算の端数は、最後の1円まで合計が合うように自動で配ります。</p>
+        </Acc>
+        <Acc title="🛟 バックアップ手順">
+          <p>「バックアップコードをコピー」→ LINEのグループやKeepに貼って送るだけ。1日1回、夜のホテルでやるのがおすすめ。</p>
+          <p>別のスマホのコードは、「その他」の「コードを貼り付けて読み込む」から読み込みます。読み込むと「統合」か「上書き復元」を選ぶ画面が出ます。</p>
+          <p>端末を変えたら、設定で「自分」を選び直してください。</p>
+        </Acc>
+        <Acc title="👥 みんなのデータを1つにそろえる手順">
+          <p>全員が各自のスマホで入力していても、次の手順で全員を同じ状態にできます。</p>
+          <p>① 全員が「バックアップコードをコピー」して、集める人にLINEで送る。</p>
+          <p>② 集める人は、受け取ったコードを1つずつ「コードを貼り付けて読み込む」→「統合する」。同じコードを2回入れても重複しません。</p>
+          <p>③ 集める人が「バックアップコードをコピー」して、全員に送り直す。</p>
+          <p>④ 受け取った人は、読み込んで「上書き復元する」。これで全員が同じ状態になります。</p>
+          <p className="font-black pt-1">⚠️ 気をつけること</p>
+          <p>・コードを送ってから配り直しが終わるまで、入力しないでください。その間に入力した支出は、④の上書きで消えます。</p>
+          <p>・入力してしまったときは、④の前にもう一度コードを送り直してください。集める人が追加で統合できます。</p>
+          <p>・上書きの画面に「このコードに入っていない支出が○件」と出たら、それは消える分です。いったんキャンセルして、コードを送り直しましょう。</p>
+          <p>・うっかり上書きしたときは、「その他」の「直前の状態に戻す」で1回だけ戻せます。</p>
+          <p>・同じ支出を2人が入力すると二重になります。「払った人だけが入力する」と決めておくと安全です。</p>
+          <p>・削除と編集は統合では反映されません。直したいときは、1人が直してから①〜④をやり直してください。</p>
+          <p>・上書きすると、メンバー名・レート・費目もコードの内容になります。「自分」の設定だけは、そのスマホのまま変わりません。</p>
+        </Acc>
+        <Acc title="💾 データが消えないしくみ">
+          <p>記録するたびにこのブラウザへ自動保存されます。リロードしても大丈夫。</p>
+          <p>ただしブラウザのデータ削除やシークレットモードでは消えるので、バックアップも併用してください。</p>
+        </Acc>
+      </section>
+
+      <section>
+        <H>⚠️ 危険ゾーン</H>
+        <Btn kind="danger" onClick={onReset}>全データをリセット</Btn>
+      </section>
+
+      {pending&&!replaceAsk&&(
+        <Modal>
+          <div className="text-4xl mb-2">📦</div>
+          <h3 className="text-xl font-black">バックアップを読み込みました</h3>
+          <div className="mt-3 space-y-1 font-bold">
+            <p>🧳 {pending.tripName||'（名前なし）'}</p>
+            <p>🧾 支出 {pending.expenses.length}件／合計 {yen(pendTotal)}</p>
+            <p>👥 {pending.members.join('、')}</p>
+            {pending.exportedAt&&<p className="text-sm text-ink/60">書き出し：{fmtDate(pending.exportedAt)} {fmtTime(pending.exportedAt)}</p>}
+            <p className="text-sm text-ink/60">いまの端末：{S.expenses.length}件</p>
+          </div>
+          {lost>0&&(
+            <div className="mt-3 rounded-2xl bg-sun/30 border-2 border-sun p-3 text-sm font-bold leading-relaxed">
+              ⚠️ この端末には、このコードに入っていない支出が{lost}件あります。<span className="font-black">上書き復元するとその{lost}件は消えます。</span>統合なら残ります。
+            </div>
+          )}
+          <div className="space-y-1 mt-4">
+            <Btn kind="dark" disabled={!canMerge} onClick={()=>doMerge(pending)}>➕ 統合する</Btn>
+            <p className="text-xs font-bold text-ink/60 pb-2">いまのデータは残して、足りない支出だけ追加します。みんなのコードを集めるときはこちら。</p>
+            {!canMerge&&<p className="text-xs font-bold text-bad pb-2">メンバー人数が違うため統合できません</p>}
+            <Btn kind="danger" onClick={()=>setReplaceAsk(true)}>♻️ 上書き復元する</Btn>
+            <p className="text-xs font-bold text-ink/60 pb-2">いまのデータを、このコードの内容に置き換えます。配られたコードを受け取るときはこちら。</p>
+            <Btn kind="ghost" onClick={()=>setPending(null)}>キャンセル</Btn>
+          </div>
+        </Modal>
+      )}
+      {pending&&replaceAsk&&(
+        <TwoStep title="いまのデータを置き換えますか？" lines={[`いまの端末の${S.expenses.length}件が、コードの${pending.expenses.length}件に置き換わります。`+(lost>0?`このコードに入っていない${lost}件は消えます。`:''),'置き換え直前の状態は1回分だけ「直前の状態に戻す」で戻せます。']} okLabel="上書き復元する" onCancel={()=>setReplaceAsk(false)} onOk={()=>doReplace(pending)}/>
+      )}
+    </div>
+  );
+}
+
+/* ============ 初回セットアップ ============ */
+function Setup({S,setS}){
+  const [name,setName]=useState(S.tripName);
+  const [ms,setMs]=useState(S.members);
+  const [me,setMe]=useState(0);
+  const ok=ms.every(m=>m.trim());
+  return (
+    <Modal>
+      <div className="text-4xl mb-1">🧳</div>
+      <h3 className="text-2xl font-black">はじめましょう</h3>
+      <p className="text-ink/70 mt-1 text-sm font-bold">名前はあとから設定で変えられます。</p>
+      <p className="font-black mt-4 mb-1">旅の名前</p>
+      <input value={name} maxLength={20} onChange={e=>setName(e.target.value)} className="w-full h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+      <p className="font-black mt-4 mb-1">メンバーと、このスマホの持ち主</p>
+      <div className="space-y-2">
+        {ms.map((m,i)=>(
+          <div key={i} className="flex gap-2 items-center">
+            <Dot i={i} size={14}/>
+            <input value={m} maxLength={8} onChange={e=>setMs(a=>a.map((x,j)=>j===i?e.target.value:x))} className="flex-1 min-w-0 h-12 rounded-xl border-2 border-ink/20 px-3 font-bold"/>
+            <button onClick={()=>setMe(i)} className={`h-12 px-3 rounded-xl font-black border-2 ${me===i?'bg-ink text-lime border-ink':'bg-white border-ink/15'}`}>自分</button>
+          </div>
+        ))}
+      </div>
+      <Btn className="mt-5" disabled={!ok} onClick={()=>setS(s=>({...s,tripName:name.trim()||'旅行',members:ms.map(x=>x.trim()),me,lastPayer:me,setup:true}))}>この内容ではじめる</Btn>
+    </Modal>
+  );
+}
+
+/* ============ App ============ */
+function App(){
+  const [S,setS]=useState(load);
+  const [tab,setTab]=useState('home');
+  const [toast,setToast]=useState('');
+  const [rateEdit,setRateEdit]=useState(null);
+  const [rateVal,setRateVal]=useState('');
+  const [resetAsk,setResetAsk]=useState(false);
+  const tRef=useRef();
+  const say=useCallback(m=>{setToast(m);clearTimeout(tRef.current);tRef.current=setTimeout(()=>setToast(''),2400)},[]);
+  useEffect(()=>{store.set(KEY,JSON.stringify(S))},[S]);
+  const snap=()=>store.set(PREV,JSON.stringify({at:Date.now(),data:S}));
+  const bal=useMemo(()=>balances(S),[S.expenses,S.members]);
+  const tr=useMemo(()=>settle(bal),[bal]);
+  const openRate=c=>{setRateEdit(c);setRateVal(String(S.rates[c]))};
+  const saveRate=()=>{const v=parseFloat(rateVal);if(v>0){setS(s=>({...s,rates:{...s.rates,[rateEdit]:v}}));say(`${rateEdit} のレートを更新しました`)}setRateEdit(null)};
+  const tabs=[['home','🏠','ホーム'],['add','✏️','入力'],['hist','🧾','履歴'],['settle','💸','精算'],['more','⚙️','その他']];
+  const common={S,setS,say,snap,onEditRate:openRate};
+  return (
+    <div className="max-w-md mx-auto min-h-screen relative">
+      <header className="sticky top-0 z-30 bg-paper/95 backdrop-blur px-4 pt-3 pb-2 flex items-center justify-between" style={{paddingTop:'max(env(safe-area-inset-top),12px)'}}>
+        <div className="font-black text-lg">たびわり</div>
+        <div className={`text-xs font-black rounded-full px-3 py-1 ${store.persistent?'bg-good/15 text-good':'bg-bad/15 text-bad'}`}>
+          {store.persistent?'● 自動保存オン':'⚠ 保存できない環境'}
+        </div>
+      </header>
+      {!store.persistent&&(
+        <div className="mx-4 mb-3 rounded-2xl bg-bad/10 border-2 border-bad/30 p-3 text-sm font-bold">
+          このプレビュー内ではブラウザ保存が使えず、リロードでデータが消えます。ファイルをスマホのブラウザで直接開く（またはホスティングする）と自動保存されます。いまは「バックアップコード」をこまめにコピーしてください。
+        </div>
+      )}
+      <main className="px-4 pb-32 pt-1">
+        {tab==='home'&&<Home S={S} bal={bal} go={setTab}/>}
+        {tab==='add'&&<AddTab {...common}/>}
+        {tab==='hist'&&<History {...common}/>}
+        {tab==='settle'&&<Settle S={S} bal={bal} tr={tr} say={say}/>}
+        {tab==='more'&&<More {...common} onReset={()=>setResetAsk(true)}/>}
+      </main>
+
+      <nav className="fixed bottom-0 left-0 right-0 z-40">
+        <div className="max-w-md mx-auto bg-white border-t-2 border-ink px-2 pt-2 safe-b grid grid-cols-5">
+          {tabs.map(([k,e,l])=>(
+            <button key={k} onClick={()=>{setTab(k);window.scrollTo(0,0)}} className={`flex flex-col items-center py-1 rounded-xl nosel ${tab===k?'':'opacity-55'}`}>
+              <span className={`text-2xl w-12 h-8 flex items-center justify-center rounded-full ${tab===k?'bg-lime':''}`}>{e}</span>
+              <span className="text-[11px] font-black mt-0.5">{l}</span>
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      {toast&&<div className="fixed left-1/2 -translate-x-1/2 bottom-28 z-[60] pop bg-ink text-white font-bold rounded-full px-5 py-3 text-sm shadow-lg max-w-[90vw] text-center">{toast}</div>}
+
+      {!S.setup&&<Setup S={S} setS={setS}/>}
+
+      {rateEdit&&(
+        <Modal>
+          <h3 className="text-xl font-black">{rateEdit} のレート</h3>
+          <p className="text-sm text-ink/60 font-bold mt-1">1 {rateEdit} = 何円？（過去の記録は変わりません）</p>
+          <input autoFocus inputMode="decimal" value={rateVal} onChange={e=>setRateVal(e.target.value.replace(/[^0-9.]/g,''))} className="w-full h-14 mt-3 rounded-xl border-2 border-ink/20 px-3 text-2xl font-black text-right"/>
+          <div className="grid grid-cols-2 gap-3 mt-4"><Btn kind="ghost" onClick={()=>setRateEdit(null)}>キャンセル</Btn><Btn kind="dark" onClick={saveRate}>保存</Btn></div>
+        </Modal>
+      )}
+
+      {resetAsk&&(
+        <TwoStep title="全データをリセットしますか？" lines={['記録した支出・メンバー・設定がすべて消えます。','先にバックアップコードをコピーしましたか？リセット直前の状態は「直前の状態に戻す」で1回だけ戻せます。']} okLabel="すべて消す" typeWord="リセット"
+          onCancel={()=>setResetAsk(false)}
+          onOk={()=>{snap();setS(initial());setResetAsk(false);setTab('home');say('リセットしました')}}/>
+      )}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
